@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -23,17 +24,18 @@ var propertySizes = map[string]int{
 	"double": 8,
 }
 
-const regExpFormat = "^format (ascii|binary_little_endian).*"
+const regExpFormat = "^format (ascii|binary_little_endian|binary_big_endian).*"
 const regExpComment = "^comment (.*)"
 const regExpElement = "^element (\\w*) (\\d*)"
 const regExpProperty = "^property (char|uchar|short|ushort|int|uint|float|double) (\\w*)"
 const headerEnd = "end_header"
 
 type ElementReader struct {
-	pos     int64
-	offset  int64
-	file    *os.File
-	element *element
+	pos       int64
+	offset    int64
+	file      *os.File
+	element   *element
+	bigEndian bool
 }
 
 type element struct {
@@ -59,6 +61,7 @@ type PlyFile struct {
 	file      *os.File
 	headerStr string
 	header    *header
+	bigEndian bool
 }
 
 func memcpy(bits []byte, dest unsafe.Pointer) {
@@ -102,10 +105,12 @@ func Open(name string) (*PlyFile, error) {
 
 	ply.parseHeader()
 
-	if ply.header.Format != "binary_little_endian" {
+	if ply.header.Format != "binary_little_endian" && ply.header.Format != "binary_big_endian" {
 		file.Close()
-		return nil, errors.New("binary_little_endian support only")
+		return nil, errors.New("binary_little_endian or binary_big_endian support only")
 	}
+
+	ply.bigEndian = ply.header.Format == "binary_big_endian"
 
 	return ply, nil
 }
@@ -238,10 +243,11 @@ func (f *PlyFile) GetElementReader(name string) (*ElementReader, error) {
 	}
 
 	return &ElementReader{
-		file:    f.file,
-		offset:  f.header.offset + f.getElementOffset(name),
-		pos:     0,
-		element: f.getElement(name),
+		file:      f.file,
+		offset:    f.header.offset + f.getElementOffset(name),
+		pos:       0,
+		element:   f.getElement(name),
+		bigEndian: f.bigEndian,
 	}, nil
 }
 
@@ -287,34 +293,38 @@ func (r *ElementReader) ReadNext(pointer interface{}) (int64, error) {
 		if t.Kind() == reflect.Struct {
 			for i := 0; i < v.NumField(); i++ {
 				if t.Field(i).Tag.Get("ply") == prop.Name {
+					b := buf[offset : offset+prop.Size]
+					if r.bigEndian {
+						slices.Reverse(b)
+					}
 					switch prop.Type {
 					case "char", "uchar":
 						v := byte(0)
-						memcpy(buf[offset:offset+prop.Size], unsafe.Pointer(&v))
+						memcpy(b, unsafe.Pointer(&v))
 						reflect.ValueOf(pointer).Elem().Field(i).Set(reflect.ValueOf(v))
 					case "short":
 						v := int16(0)
-						memcpy(buf[offset:offset+prop.Size], unsafe.Pointer(&v))
+						memcpy(b, unsafe.Pointer(&v))
 						reflect.ValueOf(pointer).Elem().Field(i).Set(reflect.ValueOf(v))
 					case "ushort":
 						v := uint16(0)
-						memcpy(buf[offset:offset+prop.Size], unsafe.Pointer(&v))
+						memcpy(b, unsafe.Pointer(&v))
 						reflect.ValueOf(pointer).Elem().Field(i).Set(reflect.ValueOf(v))
 					case "int":
 						v := int32(0)
-						memcpy(buf[offset:offset+prop.Size], unsafe.Pointer(&v))
+						memcpy(b, unsafe.Pointer(&v))
 						reflect.ValueOf(pointer).Elem().Field(i).Set(reflect.ValueOf(v))
 					case "uint":
 						v := uint32(0)
-						memcpy(buf[offset:offset+prop.Size], unsafe.Pointer(&v))
+						memcpy(b, unsafe.Pointer(&v))
 						reflect.ValueOf(pointer).Elem().Field(i).Set(reflect.ValueOf(v))
 					case "float":
 						v := float32(0)
-						memcpy(buf[offset:offset+prop.Size], unsafe.Pointer(&v))
+						memcpy(b, unsafe.Pointer(&v))
 						reflect.ValueOf(pointer).Elem().Field(i).Set(reflect.ValueOf(v))
 					case "double":
 						v := float64(0)
-						memcpy(buf[offset:offset+prop.Size], unsafe.Pointer(&v))
+						memcpy(b, unsafe.Pointer(&v))
 						reflect.ValueOf(pointer).Elem().Field(i).Set(reflect.ValueOf(v))
 					}
 				}
